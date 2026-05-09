@@ -1,9 +1,13 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::TxHash;
+use alloy::rpc::types::TransactionReceipt;
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::batch_rpc::BatchRpcClient;
@@ -15,11 +19,14 @@ pub struct PendingTx {
     pub tx_hash: TxHash,
     pub nonce: u64,
     pub operator: String,
+    pub operator_idx: Option<usize>,
     pub t_submit: Instant,
     pub t_submit_epoch_ms: i64,
     pub phase: String,
     pub burst_id: Option<u64>,
 }
+
+pub type InflightCounters = Arc<Vec<AtomicUsize>>;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TxLifecycle {
@@ -36,6 +43,7 @@ pub struct TxLifecycle {
     pub status: String,
     pub phase: String,
     pub burst_id: Option<u64>,
+    pub error_message: Option<String>,
 }
 
 pub async fn run(
@@ -43,6 +51,7 @@ pub async fn run(
     mut pending_rx: mpsc::Receiver<PendingTx>,
     mut block_rx: broadcast::Receiver<BlockNotification>,
     record_tx: mpsc::Sender<TxLifecycle>,
+    inflight: Option<InflightCounters>,
 ) {
     let mut pending: HashMap<TxHash, PendingTx> = HashMap::new();
     let mut submitter_done = false;
@@ -79,15 +88,34 @@ pub async fn run(
         }
 
         const RECEIPT_CHUNK: usize = 50;
+        const RECEIPT_INFLIGHT: usize = 5;
         let hashes: Vec<TxHash> = pending.keys().copied().collect();
-        let mut all_results = Vec::new();
+        let mut all_results: Vec<(TxHash, Option<TransactionReceipt>)> = Vec::new();
+
+        let mut receipt_tasks: JoinSet<Vec<(TxHash, Option<TransactionReceipt>)>> = JoinSet::new();
         for chunk in hashes.chunks(RECEIPT_CHUNK) {
-            match batch_client.batch_receipts(chunk).await {
-                Ok(results) => all_results.extend(results),
-                Err(e) => {
-                    warn!("batch receipt chunk failed ({} hashes): {e}", chunk.len());
+            while receipt_tasks.len() >= RECEIPT_INFLIGHT {
+                if let Some(Ok(results)) = receipt_tasks.join_next().await {
+                    all_results.extend(results);
                 }
             }
+            let client = batch_client.clone();
+            let chunk_owned: Vec<TxHash> = chunk.to_vec();
+            receipt_tasks.spawn(async move {
+                match client.batch_receipts(&chunk_owned).await {
+                    Ok(results) => results,
+                    Err(e) => {
+                        tracing::warn!(
+                            "batch receipt chunk failed ({} hashes): {e}",
+                            chunk_owned.len()
+                        );
+                        Vec::new()
+                    }
+                }
+            });
+        }
+        while let Some(Ok(results)) = receipt_tasks.join_next().await {
+            all_results.extend(results);
         }
 
         let now = Instant::now();
@@ -96,6 +124,11 @@ pub async fn run(
         for (hash, maybe_receipt) in all_results {
             if let Some(receipt) = maybe_receipt {
                 if let Some(ptx) = pending.remove(&hash) {
+                    if let (Some(counters), Some(idx)) = (&inflight, ptx.operator_idx) {
+                        if idx < counters.len() {
+                            counters[idx].fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
                     let latency = now.duration_since(ptx.t_submit).as_millis() as i64;
                     let record = TxLifecycle {
                         tx_hash: format!("{hash}"),
@@ -115,6 +148,7 @@ pub async fn run(
                         },
                         phase: ptx.phase,
                         burst_id: ptx.burst_id,
+                        error_message: None,
                     };
                     let _ = record_tx.send(record).await;
                 }
@@ -130,6 +164,11 @@ pub async fn run(
 
         for hash in timed_out {
             if let Some(ptx) = pending.remove(&hash) {
+                if let (Some(counters), Some(idx)) = (&inflight, ptx.operator_idx) {
+                    if idx < counters.len() {
+                        counters[idx].fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
                 warn!("tx {} dropped (timeout)", hash);
                 let record = TxLifecycle {
                     tx_hash: format!("{hash}"),
@@ -145,6 +184,7 @@ pub async fn run(
                     status: "dropped".into(),
                     phase: ptx.phase,
                     burst_id: ptx.burst_id,
+                    error_message: None,
                 };
                 let _ = record_tx.send(record).await;
             }

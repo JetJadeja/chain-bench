@@ -21,7 +21,7 @@ const BATCH_CHUNK: usize = 500;
 
 struct WalletStatus {
     address: Address,
-    needs_eth: bool,
+    eth_deficit: U256,
     mint_amount: U256,
     needs_approve: bool,
 }
@@ -97,7 +97,11 @@ pub async fn run(config: FundConfig) -> Result<()> {
         let tok_bal = U256::from_be_slice(&token_results[i]);
         let allowance = U256::from_be_slice(&allowance_results[i]);
 
-        let needs_eth = eth_bal < wallet_eth_amount;
+        let eth_deficit = if eth_bal < wallet_eth_amount {
+            wallet_eth_amount - eth_bal
+        } else {
+            U256::ZERO
+        };
         let mint_amount = if tok_bal < config.token_amount {
             config.token_amount - tok_bal
         } else {
@@ -105,7 +109,7 @@ pub async fn run(config: FundConfig) -> Result<()> {
         };
         let needs_approve = allowance < config.token_amount;
 
-        if needs_eth {
+        if eth_deficit > U256::ZERO {
             eth_count += 1;
         }
         if mint_amount > U256::ZERO {
@@ -117,7 +121,7 @@ pub async fn run(config: FundConfig) -> Result<()> {
 
         statuses.push(WalletStatus {
             address: *addr,
-            needs_eth,
+            eth_deficit,
             mint_amount,
             needs_approve,
         });
@@ -141,14 +145,14 @@ pub async fn run(config: FundConfig) -> Result<()> {
         let t_deploy = Instant::now();
         let mut raw_txs: Vec<Vec<u8>> = Vec::with_capacity(eth_count + mint_count);
 
-        // ETH sends
+        // ETH sends (only the deficit)
         for s in &statuses {
-            if !s.needs_eth {
+            if s.eth_deficit == U256::ZERO {
                 continue;
             }
             let tx = TransactionRequest::default()
                 .with_to(s.address)
-                .with_value(wallet_eth_amount)
+                .with_value(s.eth_deficit)
                 .with_nonce(deployer_nonce)
                 .with_gas_limit(GAS_LIMIT_TRANSFER)
                 .with_gas_price(gas_price)
@@ -370,24 +374,28 @@ pub async fn run(config: FundConfig) -> Result<()> {
         for (i, key) in op_keys.iter().enumerate() {
             let addr = key.address();
             let has_role = !role_results[i].is_empty() && role_results[i][31] == 1;
-            let needs_eth = op_balances[i] < config.operator_eth_wei;
+            let eth_deficit = if op_balances[i] < config.operator_eth_wei {
+                config.operator_eth_wei - op_balances[i]
+            } else {
+                U256::ZERO
+            };
             let needs_role = !has_role;
 
-            if !needs_eth && !needs_role {
+            if eth_deficit == U256::ZERO && !needs_role {
                 info!("operator {i} ({addr}): ok");
                 continue;
             }
 
             info!(
                 "operator {i} ({addr}): ETH:{} ROLE:{}",
-                if needs_eth { "need" } else { "ok" },
+                if eth_deficit > U256::ZERO { "need" } else { "ok" },
                 if needs_role { "need" } else { "ok" },
             );
 
-            if needs_eth {
+            if eth_deficit > U256::ZERO {
                 let tx = TransactionRequest::default()
                     .with_to(addr)
-                    .with_value(config.operator_eth_wei)
+                    .with_value(eth_deficit)
                     .with_nonce(deployer_nonce)
                     .with_gas_limit(GAS_LIMIT_TRANSFER)
                     .with_gas_price(gas_price)

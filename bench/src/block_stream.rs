@@ -19,9 +19,19 @@ pub fn start_polling(
     let tx_clone = tx.clone();
 
     tokio::spawn(async move {
-        let mut last_block = 0u64;
+        // Initialize to current tip so we don't try to fetch historical blocks
+        let mut last_block = match provider.get_block_number().await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("initial eth_blockNumber failed: {e}, starting from 0");
+                0
+            }
+        };
+        debug!("block stream initialized at block {last_block}");
 
         loop {
+            tokio::time::sleep(poll_interval).await;
+
             match provider.get_block_number().await {
                 Ok(tip) => {
                     if tip > last_block {
@@ -37,10 +47,7 @@ pub fn start_polling(
                                         timestamp: block.header.timestamp,
                                         observed_at,
                                     };
-                                    if tx_clone.send(notif).is_err() {
-                                        debug!("no block stream receivers, stopping");
-                                        return;
-                                    }
+                                    let _ = tx_clone.send(notif);
                                 }
                                 Ok(None) => {
                                     warn!("block {n} returned None");
@@ -57,8 +64,6 @@ pub fn start_polling(
                     warn!("eth_blockNumber failed: {e}");
                 }
             }
-
-            tokio::time::sleep(poll_interval).await;
         }
     });
 

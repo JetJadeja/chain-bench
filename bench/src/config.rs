@@ -8,6 +8,8 @@ use crate::cli::{Cli, FundArgs, MarketArgs, SimulateArgs};
 
 pub struct Config {
     pub rpc_url: String,
+    pub rpc_urls: Vec<String>,
+    pub tracker_rpc_url: String,
     pub chain_id: u64,
     pub vault: Address,
     pub token: Address,
@@ -47,8 +49,24 @@ impl Config {
             .parse()
             .wrap_err("invalid deployer private key")?;
 
+        let mut rpc_urls = vec![cli.rpc.clone()];
+        for extra in &cli.rpc_extra {
+            let trimmed = extra.trim();
+            if !trimmed.is_empty() {
+                rpc_urls.push(trimmed.to_string());
+            }
+        }
+
+        let tracker_rpc_url = cli
+            .tracker_rpc
+            .as_deref()
+            .unwrap_or(&cli.rpc)
+            .to_string();
+
         Ok(Self {
             rpc_url: cli.rpc.clone(),
+            rpc_urls,
+            tracker_rpc_url,
             chain_id: cli.chain_id,
             vault: Address::from_str(&cli.vault).wrap_err("invalid vault address")?,
             token: Address::from_str(&cli.token).wrap_err("invalid token address")?,
@@ -89,6 +107,14 @@ pub struct MarketConfig {
     pub match_amount_min: U256,
     pub match_amount_max: U256,
     pub burst_chunk: usize,
+    pub burst_inflight: usize,
+    pub skip_steady: bool,
+    pub skip_ramp: bool,
+    pub operator_window: usize,
+    pub phase_inflight: usize,
+    pub batch_max: usize,
+    pub flush_ms: u64,
+    pub gas_limit_match: u64,
 }
 
 impl MarketConfig {
@@ -108,6 +134,14 @@ impl MarketConfig {
             match_amount_max: U256::from_str(&args.match_amount_max)
                 .wrap_err("invalid match amount max")?,
             burst_chunk: args.burst_chunk,
+            burst_inflight: args.burst_inflight,
+            skip_steady: args.skip_steady,
+            skip_ramp: args.skip_ramp,
+            operator_window: args.operator_window,
+            phase_inflight: args.phase_inflight,
+            batch_max: args.batch_max,
+            flush_ms: args.flush_ms,
+            gas_limit_match: args.gas_limit_match,
         })
     }
 }

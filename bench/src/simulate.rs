@@ -18,7 +18,7 @@ use crate::nonce::AtomicNonce;
 use crate::ramp::RampSchedule;
 use crate::wallet;
 
-const GAS_LIMIT_MATCH: u64 = 500_000;
+const GAS_LIMIT_MATCH: u64 = 200_000;
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct PendingTx {

@@ -29,6 +29,14 @@ pub struct Cli {
     #[arg(long)]
     pub gas_price: Option<u128>,
 
+    /// Additional RPC URLs for round-robin load balancing (comma-separated or repeated).
+    #[arg(long, env = "MEGAETH_RPC_EXTRA", value_delimiter = ',')]
+    pub rpc_extra: Vec<String>,
+
+    /// Separate RPC URL for receipt polling / block tracking. Defaults to --rpc.
+    #[arg(long, env = "MEGAETH_RPC_TRACKER")]
+    pub tracker_rpc: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -131,7 +139,39 @@ pub struct MarketArgs {
     #[arg(long, default_value = "10000000000000000000")]
     pub match_amount_max: String,
 
-    /// Max txs per JSON-RPC batch in burst mode. 0 = send all in one batch (targets single-block inclusion).
-    #[arg(long, default_value = "0")]
+    /// Max txs per JSON-RPC batch in burst mode.
+    #[arg(long, default_value = "100")]
     pub burst_chunk: usize,
+
+    /// Max concurrent HTTP POSTs during burst. Higher = more RPC pressure but faster submission.
+    #[arg(long, default_value = "5")]
+    pub burst_inflight: usize,
+
+    /// Skip the steady-state phase and go straight to ramp/burst.
+    #[arg(long, default_value = "false")]
+    pub skip_steady: bool,
+
+    /// Skip the ramp phase.
+    #[arg(long, default_value = "false")]
+    pub skip_ramp: bool,
+
+    /// Max pending txs per operator before backpressure. 0 = no limit (dump all at once).
+    #[arg(long, default_value = "80")]
+    pub operator_window: usize,
+
+    /// Max concurrent HTTP POSTs during steady/ramp phases.
+    #[arg(long, default_value = "20")]
+    pub phase_inflight: usize,
+
+    /// Max txs per batch during steady/ramp phases.
+    #[arg(long, default_value = "200")]
+    pub batch_max: usize,
+
+    /// Flush interval in milliseconds during steady/ramp phases.
+    #[arg(long, default_value = "50")]
+    pub flush_ms: u64,
+
+    /// Gas limit for matchOrders transactions.
+    #[arg(long, default_value = "200000")]
+    pub gas_limit_match: u64,
 }

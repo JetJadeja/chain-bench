@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use alloy::primitives::{Address, TxHash, U256};
 use alloy::rpc::types::TransactionReceipt;
 use eyre::{Result, WrapErr};
@@ -7,7 +10,8 @@ use serde_json::Value;
 #[derive(Clone)]
 pub struct BatchRpcClient {
     http: reqwest::Client,
-    url: String,
+    urls: Arc<Vec<String>>,
+    counter: Arc<AtomicUsize>,
 }
 
 #[derive(Serialize)]
@@ -28,13 +32,28 @@ struct JsonRpcResponse {
 
 impl BatchRpcClient {
     pub fn new(url: &str) -> Self {
+        Self::new_multi(vec![url.to_string()])
+    }
+
+    pub fn new_multi(urls: Vec<String>) -> Self {
+        assert!(!urls.is_empty(), "need at least one RPC URL");
         Self {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("failed to build HTTP client"),
-            url: url.to_string(),
+            urls: Arc::new(urls),
+            counter: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn next_url(&self) -> &str {
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.urls.len();
+        &self.urls[idx]
+    }
+
+    pub fn num_endpoints(&self) -> usize {
+        self.urls.len()
     }
 
     async fn send_batch(&self, requests: Vec<JsonRpcRequest<'_>>) -> Result<Vec<JsonRpcResponse>> {
@@ -42,28 +61,31 @@ impl BatchRpcClient {
             return Ok(Vec::new());
         }
 
+        let url = self.next_url().to_string();
+
         for attempt in 0u32..=4 {
             let resp = self
                 .http
-                .post(&self.url)
+                .post(&url)
                 .json(&requests)
                 .send()
                 .await
                 .wrap_err("batch RPC request failed")?;
 
             let status = resp.status();
+            let code = status.as_u16();
 
-            if status.as_u16() == 429 {
+            if code == 429 || code == 500 || code == 502 || code == 503 {
                 if attempt < 4 {
                     let delay_ms = 200u64 * 2u64.pow(attempt);
                     tracing::warn!(
-                        "RPC 429 (attempt {}/5), backoff {delay_ms}ms",
+                        "RPC {code} (attempt {}/5), backoff {delay_ms}ms",
                         attempt + 1,
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
-                eyre::bail!("RPC rate limited after 5 retries");
+                eyre::bail!("RPC {code} after 5 retries");
             }
 
             if !status.is_success() {
@@ -173,6 +195,14 @@ impl BatchRpcClient {
     }
 
     pub async fn batch_get_nonces(&self, addresses: &[Address]) -> Result<Vec<u64>> {
+        self.batch_get_nonces_at(addresses, "latest").await
+    }
+
+    pub async fn batch_get_pending_nonces(&self, addresses: &[Address]) -> Result<Vec<u64>> {
+        self.batch_get_nonces_at(addresses, "pending").await
+    }
+
+    async fn batch_get_nonces_at(&self, addresses: &[Address], block_tag: &str) -> Result<Vec<u64>> {
         let requests: Vec<_> = addresses
             .iter()
             .enumerate()
@@ -182,7 +212,7 @@ impl BatchRpcClient {
                 method: "eth_getTransactionCount",
                 params: vec![
                     Value::String(format!("{addr}")),
-                    Value::String("latest".into()),
+                    Value::String(block_tag.into()),
                 ],
             })
             .collect();
