@@ -1,0 +1,9 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+eth_rpc_url = "${MEGAETH_RPC}"
+gas_limit = 30000000
+
+[rpc_endpoints]
+megaeth = "${MEGAETH_RPC}"

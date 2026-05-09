@@ -1,0 +1,19 @@
+.env
+
+# Build artifacts
+contracts/out/
+contracts/cache/
+bench/target/
+probes/target/
+
+# Deployment logs (contain deployer address, tx data)
+contracts/broadcast/
+
+# OS / editor
+.DS_Store
+
+# Tool indexes
+.cx-index.db
+
+# Benchmark results
+*.csv
